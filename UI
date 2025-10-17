@@ -1,0 +1,409 @@
+#include <Arduino.h>
+#include <lvgl.h>
+
+// Include the custom LGFX object defined in gfx_conf.h
+#include "gfx_conf.h"
+
+// --- Global Variables ---
+// LovyanGFX display object (defined in gfx_conf.h)
+extern LGFX tft; 
+
+// LVGL Display and Input buffers
+#define LV_HOR_RES_MAX  800
+#define LV_VER_RES_MAX  480
+#define DRAW_BUF_SIZE   (800 * 40) // Approx 40 lines of 800px at 16-bit
+static lv_disp_draw_buf_t draw_buf;
+static lv_color_t buf_1[DRAW_BUF_SIZE];
+static lv_color_t buf_2[DRAW_BUF_SIZE];
+static lv_disp_t *disp;
+static lv_indev_t *indev;
+
+// LVGL Theme & Styles
+lv_theme_t *theme;
+lv_style_t style_dark_bg;
+lv_style_t style_tile_cont;
+lv_style_t style_neon_btn;
+lv_style_t style_slider_knob;
+lv_obj_t *home_screen;
+lv_obj_t *settings_screen;
+
+// --- LVGL & LGFX Functions ---
+
+// LVGL Display Flush Callback for LovyanGFX
+static void lv_disp_flush(lv_disp_t *disp, const lv_area_t *area, lv_color_t *color_p) {
+    if (tft.panel()) {
+        tft.pushImage(area->x1, area->y1, area->x2 - area->x1 + 1, area->y2 - area->y1 + 1, (lgfx::swap565_t*)color_p);
+    }
+    lv_disp_flush_ready(disp);
+}
+
+// LVGL Touch Input Read Callback for LovyanGFX
+static void lv_touch_read(lv_indev_t *indev, lv_indev_data_t *data) {
+    uint16_t touchX, touchY;
+    
+    // Check if the display is being touched
+    if (tft.getTouch(&touchX, &touchY)) {
+        data->state = LV_INDEV_STATE_PRESSED;
+        data->point.x = touchX;
+        data->point.y = touchY;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
+
+// --- UI Building Blocks ---
+
+void init_styles() {
+    // 1. Dark Background Style (For screens)
+    lv_style_init(&style_dark_bg);
+    lv_style_set_bg_color(&style_dark_bg, lv_color_hex(0x0A0F17)); // Deep Navy/Black
+    lv_style_set_bg_opa(&style_dark_bg, LV_OPA_COVER);
+
+    // 2. Modular Tile Container Style
+    lv_style_init(&style_tile_cont);
+    lv_style_set_bg_color(&style_tile_cont, lv_color_hex(0x18202A)); // Slightly lighter dark
+    lv_style_set_bg_opa(&style_tile_cont, LV_OPA_70);
+    lv_style_set_radius(&style_tile_cont, 15);
+    lv_style_set_pad_all(&style_tile_cont, 20);
+    lv_style_set_border_width(&style_tile_cont, 2);
+    lv_style_set_border_color(&style_tile_cont, lv_color_hex(0x00FFFF)); // Neon Cyan Border
+    lv_style_set_border_opa(&style_tile_cont, LV_OPA_30); // Subtle glow effect
+
+    // 3. Neon Button Style (Primary Action)
+    lv_style_init(&style_neon_btn);
+    lv_style_set_bg_color(&style_neon_btn, lv_color_hex(0x00FFFF));
+    lv_style_set_bg_opa(&style_neon_btn, LV_OPA_30); // Translucent fill
+    lv_style_set_radius(&style_neon_btn, 10);
+    lv_style_set_border_width(&style_neon_btn, 2);
+    lv_style_set_border_color(&style_neon_btn, lv_color_hex(0x00FFFF));
+    lv_style_set_text_color(&style_neon_btn, lv_color_white());
+    lv_style_set_text_font(&style_neon_btn, &lv_font_montserrat_18);
+    lv_style_set_pad_all(&style_neon_btn, 12);
+    // Add shadow for "glow" (LV_DRAW_COMPLEX=1 is enabled)
+    lv_style_set_shadow_color(&style_neon_btn, lv_color_hex(0x00FFFF));
+    lv_style_set_shadow_width(&style_neon_btn, 15);
+    lv_style_set_shadow_spread(&style_neon_btn, 0);
+
+    // 4. Circular Slider Knob Style (For Fan Speed)
+    lv_style_init(&style_slider_knob);
+    lv_style_set_bg_color(&style_slider_knob, lv_color_hex(0x00FFFF));
+    lv_style_set_bg_opa(&style_slider_knob, LV_OPA_COVER);
+    lv_style_set_pad_all(&style_slider_knob, 0); // Remove padding inside knob
+    lv_style_set_shadow_color(&style_slider_knob, lv_color_hex(0x00FFFF));
+    lv_style_set_shadow_width(&style_slider_knob, 10);
+    lv_style_set_shadow_spread(&style_slider_knob, 2);
+}
+
+// Function to create a functional device tile
+lv_obj_t* create_device_tile(lv_obj_t *parent, const char *title, const char *icon_text) {
+    lv_obj_t *tile = lv_obj_create(parent);
+    lv_obj_add_style(tile, &style_tile_cont, 0);
+    lv_obj_set_size(tile, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(tile, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(tile, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER);
+
+    // Title and Icon container (Row 1)
+    lv_obj_t *header_cont = lv_obj_create(tile);
+    lv_obj_remove_style_all(header_cont);
+    lv_obj_set_size(header_cont, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(header_cont, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header_cont, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    // Icon (Large, Touch Friendly)
+    lv_obj_t *icon_label = lv_label_create(header_cont);
+    lv_label_set_text(icon_label, icon_text);
+    lv_obj_set_style_text_font(icon_label, &lv_font_montserrat_36, 0);
+    lv_obj_set_style_text_color(icon_label, lv_color_hex(0x00FFFF), 0);
+    lv_obj_set_style_pad_right(icon_label, 10, 0); // Spacing for touch
+
+    // Title (Name of device)
+    lv_obj_t *title_label = lv_label_create(header_cont);
+    lv_label_set_text(title_label, title);
+    lv_obj_set_style_text_font(title_label, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(title_label, lv_color_white(), 0);
+
+    return tile;
+}
+
+// --- Screen Definitions ---
+
+void create_status_bar(lv_obj_t *parent) {
+    lv_obj_t *status_bar = lv_obj_create(parent);
+    lv_obj_remove_style_all(status_bar); // Make it transparent
+    lv_obj_set_size(status_bar, LV_PCT(100), 40);
+    lv_obj_set_align(status_bar, LV_ALIGN_TOP_MID);
+    lv_obj_set_flex_flow(status_bar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(status_bar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    // Left: Time
+    lv_obj_t *time_label = lv_label_create(status_bar);
+    // Use a large, monospaced font if available, or montserrat_20
+    lv_label_set_text(time_label, "15:10:00"); 
+    lv_obj_set_style_text_color(time_label, lv_color_hex(0x00FFFF), 0);
+    lv_obj_set_style_text_font(time_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_pad_left(time_label, 15, 0);
+
+    // Center: Date (Placeholder)
+    lv_obj_t *date_label = lv_label_create(status_bar);
+    lv_label_set_text(date_label, "OCT 17, 2025");
+    lv_obj_set_style_text_color(date_label, lv_color_make(0xAA, 0xAA, 0xAA), 0);
+    lv_obj_set_style_text_font(date_label, &lv_font_montserrat_16, 0);
+
+    // Right: Icons (Wi-Fi, Power)
+    lv_obj_t *icon_cont = lv_obj_create(status_bar);
+    lv_obj_remove_style_all(icon_cont);
+    lv_obj_set_size(icon_cont, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(icon_cont, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_right(icon_cont, 15, 0);
+    lv_obj_set_style_layout(icon_cont, LV_LAYOUT_FLEX, 0);
+    
+    lv_obj_t *wifi_icon = lv_label_create(icon_cont);
+    lv_label_set_text(wifi_icon, LV_SYMBOL_WIFI);
+    lv_obj_set_style_text_color(wifi_icon, lv_color_hex(0x00FFFF), 0);
+    lv_obj_set_style_text_font(wifi_icon, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_pad_right(wifi_icon, 10, 0);
+}
+
+
+void create_home_screen() {
+    home_screen = lv_obj_create(NULL);
+    lv_obj_add_style(home_screen, &style_dark_bg, 0);
+    lv_obj_set_size(home_screen, LV_HOR_RES_MAX, LV_VER_RES_MAX);
+    lv_obj_set_style_pad_all(home_screen, 0, 0);
+
+    // 1. Status Bar
+    create_status_bar(home_screen);
+
+    // 2. Main Grid Container
+    lv_obj_t *main_cont = lv_obj_create(home_screen);
+    lv_obj_remove_style_all(main_cont);
+    lv_obj_set_size(main_cont, LV_PCT(95), LV_VER_RES_MAX - 80);
+    lv_obj_set_align(main_cont, LV_ALIGN_BOTTOM_MID);
+    lv_obj_set_layout(main_cont, LV_LAYOUT_GRID);
+    lv_obj_set_style_grid_column_dsc_array(main_cont, (const lv_coord_t[]){LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_END}, 0);
+    lv_obj_set_style_grid_row_dsc_array(main_cont, (const lv_coord_t[]){LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_END}, 0);
+    lv_obj_set_style_grid_row_gap(main_cont, 20, 0);
+    lv_obj_set_style_grid_column_gap(main_cont, 20, 0);
+
+    // --- Tiles (Modular Widgets) ---
+
+    // 2.1 Lights Tile (Grid: 0, 0)
+    lv_obj_t *light_tile = create_device_tile(main_cont, "Living Room Lights", LV_SYMBOL_BULB);
+    lv_obj_set_grid_cell(light_tile, LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
+    
+    // Add functional toggle switch
+    lv_obj_t *light_switch = lv_switch_create(light_tile);
+    lv_obj_add_flag(light_switch, LV_OBJ_FLAG_CHECKABLE); // Ensure it's large enough
+
+    // 2.2 Fan Tile (Grid: 1, 0)
+    lv_obj_t *fan_tile = create_device_tile(main_cont, "Ceiling Fan", LV_SYMBOL_REFRESH);
+    lv_obj_set_grid_cell(fan_tile, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 0, 1);
+
+    // Add a circular slider (glowing knob)
+    lv_obj_t *fan_slider = lv_arc_create(fan_tile);
+    lv_obj_set_size(fan_slider, 80, 80);
+    lv_obj_center(fan_slider);
+    lv_arc_set_range(fan_slider, 0, 4); // Speed 0-4
+    lv_arc_set_value(fan_slider, 2);
+    lv_obj_set_style_arc_color(fan_slider, lv_color_hex(0x00FFFF), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(fan_slider, 8, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(fan_slider, lv_color_hex(0x333333), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(fan_slider, 8, LV_PART_MAIN);
+    
+    // Apply the custom glowing knob style
+    lv_obj_add_style(fan_slider, &style_slider_knob, LV_PART_KNOB);
+
+    // 2.3 AC Tile (Grid: 0, 1) - Double Height
+    lv_obj_t *ac_tile = create_device_tile(main_cont, "Thermostat", LV_SYMBOL_TEMPERATURE);
+    lv_obj_set_grid_cell(ac_tile, LV_GRID_ALIGN_STRETCH, 0, 1, LV_GRID_ALIGN_STRETCH, 1, 2);
+    
+    // Placeholder for temperature display
+    lv_obj_t *temp_label = lv_label_create(ac_tile);
+    lv_label_set_text(temp_label, "24°C");
+    lv_obj_set_style_text_font(temp_label, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(temp_label, lv_color_white(), 0);
+    
+    // 2.4 Lock & Settings Tile (Grid: 1, 1)
+    lv_obj_t *lock_settings_cont = lv_obj_create(main_cont);
+    lv_obj_remove_style_all(lock_settings_cont);
+    lv_obj_set_size(lock_settings_cont, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_grid_cell(lock_settings_cont, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_STRETCH, 1, 1);
+    lv_obj_set_flex_flow(lock_settings_cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(lock_settings_cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_SPACE_AROUND);
+
+
+    // Lock Button (Neon, large touch target)
+    lv_obj_t *lock_btn = lv_btn_create(lock_settings_cont);
+    lv_obj_add_style(lock_btn, &style_neon_btn, 0);
+    lv_obj_set_size(lock_btn, LV_PCT(90), 80);
+    lv_obj_set_style_shadow_color(lock_btn, lv_color_red(), LV_STATE_CHECKED); // Red glow when locked
+    lv_obj_set_style_shadow_width(lock_btn, 15, LV_STATE_CHECKED);
+    lv_obj_add_flag(lock_btn, LV_OBJ_FLAG_CHECKABLE); 
+    lv_obj_t *lock_label = lv_label_create(lock_btn);
+    lv_label_set_text(lock_label, LV_SYMBOL_LOCK " Door Lock");
+    lv_obj_center(lock_label);
+
+
+    // Settings Button (Navigation)
+    lv_obj_t *settings_btn = lv_btn_create(lock_settings_cont);
+    lv_obj_add_style(settings_btn, &style_neon_btn, 0);
+    lv_obj_set_size(settings_btn, LV_PCT(90), 80);
+    lv_obj_t *settings_label = lv_label_create(settings_btn);
+    lv_label_set_text(settings_label, LV_SYMBOL_SETTINGS " Settings");
+    lv_obj_center(settings_label);
+
+    // Set up navigation for the settings button
+    lv_obj_add_event_cb(settings_btn, [](lv_event_t *e) {
+        // Use a smooth animation for transition (e.g., slide left)
+        lv_scr_load_anim(settings_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 500, 0, false);
+    }, LV_EVENT_CLICKED, NULL);
+
+    // Set the initial screen
+    lv_disp_load_scr(home_screen);
+}
+
+void create_settings_screen() {
+    settings_screen = lv_obj_create(NULL);
+    lv_obj_add_style(settings_screen, &style_dark_bg, 0);
+    lv_obj_set_size(settings_screen, LV_HOR_RES_MAX, LV_VER_RES_MAX);
+    lv_obj_set_style_pad_all(settings_screen, 0, 0);
+    lv_obj_set_flex_flow(settings_screen, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_top(settings_screen, 40, 0); // Account for hidden status bar space
+
+    // 1. Header (Title and Back Button)
+    lv_obj_t *header = lv_obj_create(settings_screen);
+    lv_obj_remove_style_all(header);
+    lv_obj_set_size(header, LV_PCT(95), 50);
+    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_left(header, 20, 0);
+    lv_obj_set_style_pad_right(header, 20, 0);
+
+    lv_obj_t *back_btn = lv_btn_create(header);
+    lv_obj_remove_style_all(back_btn);
+    lv_obj_set_size(back_btn, 60, 60);
+    lv_obj_t *back_label = lv_label_create(back_btn);
+    lv_label_set_text(back_label, LV_SYMBOL_LEFT);
+    lv_obj_center(back_label);
+    lv_obj_set_style_text_font(back_label, &lv_font_montserrat_36, 0);
+    lv_obj_set_style_text_color(back_label, lv_color_hex(0x00FFFF), 0);
+    lv_obj_set_style_bg_color(back_btn, lv_color_hex(0x00FFFF), LV_STATE_PRESSED); // Touch feedback
+    lv_obj_set_style_bg_opa(back_btn, LV_OPA_30, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(back_btn, 10, 0);
+
+    lv_obj_t *title = lv_label_create(header);
+    lv_label_set_text(title, "System Settings");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_36, 0);
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_set_style_pad_left(title, 20, 0);
+
+    // Back button navigation
+    lv_obj_add_event_cb(back_btn, [](lv_event_t *e) {
+        lv_scr_load_anim(home_screen, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 500, 0, false);
+    }, LV_EVENT_CLICKED, NULL);
+
+    // 2. Settings List Container
+    lv_obj_t *list_cont = lv_obj_create(settings_screen);
+    lv_obj_remove_style_all(list_cont);
+    lv_obj_set_size(list_cont, LV_PCT(90), LV_PCT(80));
+    lv_obj_set_flex_flow(list_cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(list_cont, 20, 0);
+    lv_obj_set_style_pad_row(list_cont, 15, 0);
+    
+    // --- Setting Row Template ---
+    auto create_setting_row = [&](const char* title, const char* icon, lv_obj_t* widget) {
+        lv_obj_t *row = lv_obj_create(list_cont);
+        lv_obj_add_style(row, &style_tile_cont, 0);
+        lv_obj_set_size(row, LV_PCT(100), 70);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_border_opa(row, LV_OPA_10, 0); // Lighter border for list
+        lv_obj_set_style_shadow_width(row, 0, 0); // No shadow on list items
+
+        lv_obj_t *text_cont = lv_obj_create(row);
+        lv_obj_remove_style_all(text_cont);
+        lv_obj_set_size(text_cont, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(text_cont, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(text_cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        
+        lv_obj_t *icon_label = lv_label_create(text_cont);
+        lv_label_set_text(icon_label, icon);
+        lv_obj_set_style_text_color(icon_label, lv_color_hex(0x00FFFF), 0);
+        lv_obj_set_style_text_font(icon_label, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_pad_right(icon_label, 15, 0);
+        
+        lv_obj_t *title_label = lv_label_create(text_cont);
+        lv_label_set_text(title_label, title);
+        lv_obj_set_style_text_color(title_label, lv_color_white(), 0);
+        lv_obj_set_style_text_font(title_label, &lv_font_montserrat_18, 0);
+
+        if (widget) {
+            lv_obj_set_parent(widget, row); // Move the widget into the row
+            lv_obj_set_align(widget, LV_ALIGN_RIGHT_MID);
+        }
+    };
+    
+    // --- Actual Settings Rows ---
+    
+    // Setting 1: Wi-Fi Toggle
+    lv_obj_t *wifi_switch = lv_switch_create(NULL);
+    create_setting_row("Wi-Fi Status", LV_SYMBOL_WIFI, wifi_switch);
+
+    // Setting 2: Brightness Slider
+    lv_obj_t *bright_slider = lv_slider_create(NULL);
+    lv_obj_set_width(bright_slider, 150);
+    lv_obj_set_range(bright_slider, 10, 100);
+    lv_slider_set_value(bright_slider, 70, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(bright_slider, lv_color_hex(0x00FFFF), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(bright_slider, lv_color_hex(0x333333), LV_PART_MAIN);
+    lv_obj_add_style(bright_slider, &style_slider_knob, LV_PART_KNOB);
+    create_setting_row("Display Brightness", LV_SYMBOL_SUN, bright_slider);
+
+    // Setting 3: Dark Mode Toggle
+    lv_obj_t *dark_switch = lv_switch_create(NULL);
+    create_setting_row("Dark Mode", LV_SYMBOL_EYE_OPEN, dark_switch);
+}
+
+
+// --- Arduino Functions ---
+
+void setup() {
+    Serial.begin(115200);
+    
+    // 1. Initialize LovyanGFX
+    tft.init();         // Initialize the display panel
+    tft.setRotation(1); // Set landscape orientation (assuming 800x480 is landscape)
+    tft.setBrightness(180); // Set a default brightness
+
+    // 2. Initialize LVGL
+    lv_init();
+
+    // 3. Setup LVGL Display & Input
+    lv_disp_draw_buf_init(&draw_buf, buf_1, buf_2, DRAW_BUF_SIZE);
+    disp = lv_disp_create(LV_HOR_RES_MAX, LV_VER_RES_MAX);
+    lv_disp_set_draw_buf(disp, &draw_buf);
+    lv_disp_set_flush_cb(disp, lv_disp_flush);
+
+    indev = lv_indev_create();
+    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(indev, lv_touch_read);
+
+    // 4. Setup Theme and Custom Styles
+    theme = lv_theme_default_init(disp, lv_color_hex(0x00FFFF), lv_color_hex(0x00FF00), true, &lv_font_montserrat_14);
+    lv_disp_set_theme(disp, theme);
+    init_styles();
+
+    // 5. Create UI Screens
+    create_settings_screen(); // Must be created before home_screen if it's the target of navigation
+    create_home_screen();
+}
+
+void loop() {
+    // 1. LVGL Task Handler (MUST be called regularly)
+    lv_timer_handler(); 
+
+    // 2. Small delay to prevent watchdog timer from barking
+    // The LV_DISP_DEF_REFR_PERIOD of 15ms in lv_conf.h is a good minimum.
+    delay(5); 
+}
+
